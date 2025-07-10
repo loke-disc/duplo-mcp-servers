@@ -1,0 +1,195 @@
+i have some java classes which uses an embedding model and then using that and the schema descriptions it creates a RAG context. I want to convert those java classes to python
+
+public class EmbeddingService {
+
+    @Value("${rag.embedding.model-name}")
+    private String embeddingModelName;
+
+    private ZooModel<String, float[]> model;
+    private Predictor<String, float[]> predictor;
+
+    @PostConstruct
+    public void init() throws IOException {
+        try {
+            // Load a sentence-transformers model from Hugging Face
+            // Ensure you have the necessary DJL dependencies for PyTorch/Hugging Face
+            log.info("Loading embedding model: {}", embeddingModelName);
+            Criteria<String, float[]> criteria = Criteria.builder()
+                    .setTypes(String.class, float[].class)
+                    .optApplication(Application.NLP.TEXT_EMBEDDING)
+                    .optModelUrls("djl://ai.djl.huggingface.pytorch/" + embeddingModelName)
+                    .optEngine("PyTorch")
+                    .build();
+            model = criteria.loadModel();
+            predictor = model.newPredictor();
+        } catch (Exception e) {
+            System.err.println("Failed to load embedding model: " + e.getMessage());
+            // Consider throwing a custom exception or making this recoverable
+        }
+    }
+
+    @PreDestroy
+    public void destroy() {
+        if (predictor != null) {
+            predictor.close();
+        }
+        if (model != null) {
+            model.close();
+        }
+    }
+
+    public List<Double> getEmbedding(String text) {
+        if (predictor == null) {
+            log.error("Embedding predictor not initialized.");
+            return Collections.emptyList();
+        }
+        try {
+            float[] embeddingsArray = predictor.predict(text);
+            List<Double> embeddingsList = new java.util.ArrayList<>(embeddingsArray.length);
+            for (float value : embeddingsArray) {
+                embeddingsList.add((double) value);
+            }
+            return embeddingsList;
+        } catch (TranslateException e) {
+            log.error("Error generating embedding: {}", e.getMessage());
+            return Collections.emptyList();
+        }
+    }
+}
+
+public List<Map<String, Object>> getSchemaDescriptions() {
+        List<Map<String, Object>> schemaDescriptions = getSchemaDescriptionsFromFile();
+        log.info("Schema descriptions: {}", schemaDescriptions);
+        return schemaDescriptions;
+    }
+    
+public List<Map<String, Object>> getSchemaDescriptionsFromFile() {
+        try {
+            return mapper.readValue(
+                    schemaDescription.getInputStream(),
+                    mapper.getTypeFactory().constructCollectionType(List.class, Map.class)
+            );
+        } catch (Exception e) {
+            log.error("Error reading schema_descriptions.json: {}", e.getMessage());
+            return new ArrayList<>();
+        }
+    }
+
+
+private void initializeKnowledgeBase() {
+        // Load schema descriptions dynamically from SchemaService
+        List<Map<String, Object>> schemaDescriptions = schemaService.getSchemaDescriptions();
+        knowledgeBase.addAll(schemaDescriptions);
+
+        // Pre-compute embeddings for the knowledge base
+        for (Map<String, Object> entry : knowledgeBase) {
+            List<Double> embedding = embeddingService.getEmbedding((String) entry.get("text"));
+            if (!embedding.isEmpty()) {
+                entry.put("embedding", embedding);
+            }
+        }
+    }
+
+public List<String> retrieveRelevantContext(String userQuery, String previousContext) {
+        List<String> relevantChunks = new ArrayList<>();
+        String queryForEmbedding = previousContext.isEmpty()
+                ? userQuery
+                : previousContext + "\n" + userQuery;
+
+        List<Double> queryEmbedding = embeddingService.getEmbedding(queryForEmbedding);
+        if (queryEmbedding.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<Map.Entry<Double, String>> scoredChunks = new ArrayList<>();
+        for (Map<String, Object> entry : knowledgeBase) {
+            List<Double> kbEmbedding = (List<Double>) entry.get("embedding");
+            String text = (String) entry.get("text");
+
+            if (kbEmbedding != null && !kbEmbedding.isEmpty()) {
+                double similarity = cosineSimilarity(queryEmbedding, kbEmbedding);
+                if (similarity > 0.5) {
+                    scoredChunks.add(Map.entry(similarity, text));
+                }
+            }
+        }
+
+        scoredChunks.sort(Comparator.comparing(Map.Entry::getKey, Comparator.reverseOrder()));
+
+        int maxChunks = 3;
+        for (int i = 0; i < Math.min(scoredChunks.size(), maxChunks); i++) {
+            relevantChunks.add(scoredChunks.get(i).getValue());
+        }
+
+        return relevantChunks;
+    }
+
+
+    // Simple Cosine Similarity calculation
+    private double cosineSimilarity(List<Double> vectorA, List<Double> vectorB) {
+        double dotProduct = 0.0;
+        double normA = 0.0;
+        double normB = 0.0;
+        for (int i = 0; i < vectorA.size(); i++) {
+            dotProduct += vectorA.get(i) * vectorB.get(i);
+            normA += Math.pow(vectorA.get(i), 2);
+            normB += Math.pow(vectorB.get(i), 2);
+        }
+        return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
+
+[
+  {
+    "text": "The work_order table has columns: work_order_id, asset_id, workflow_id, work_order_status_id, due_date, priority, created_time, created_by, last_modified_time, last_modified_by, work_order_key, internal_work_order_id, distribution_id, operational_group_id, assignee_id, job_type_id, facility_id, operational_region_id, language_id, additional_service, search_identifier_id, search_identifier_value, prop_ep, scrid, show_code, distribution_date, property_id, file_delivery, show_uuid, replacement_status, sub_edit_type, corporate_premiere_date, region_long_name, assessment_results, rally_movie_name, network_short_name, schedule_change, is_assigned, cut_id, rally_movie_id, is_manual_due_date, received_date, cut_type, accurate_player_url, status_before_cancel, include_edit, include_script. Primary key: work_order_id. Foreign keys: workflow_id references workflow(workflow_id); operational_group_id references operational_group(operational_group_id); asset_id references asset(asset_id); language_id references language(language_id); operational_region_id references operational_region(operational_region_id); job_type_id references job_type(job_type_id); sub_edit_type references sub_edit_type(sub_edit_type_id); additional_service references sub_type(sub_type_id); file_delivery references sub_type(sub_type_id); facility_id references facility(facility_id); work_order_status_id references work_order_status(work_order_status_id); distribution_id references distribution(distribution_id); search_identifier_id references asset_metadata_type(asset_metadata_type_id); assignee_id references assignee(assignee_id);",
+    "type": "schema_desc"
+  },
+  {
+    "text": "The work_order_metadata table has columns: work_order_id, work_order_metadata_type_id, value, created_time, created_by, last_modified_time, last_modified_by. Primary key: work_order_id, work_order_metadata_type_id. Foreign keys: work_order_metadata_type_id references work_order_metadata_type(work_order_metadata_type_id); work_order_id references work_order(work_order_id);",
+    "type": "schema_desc"
+  },
+  {
+    "text": "The work_order_metadata_type table has columns: work_order_metadata_type_id, code, display_name, description, active, sort_order. Primary key: work_order_metadata_type_id.",
+    "type": "schema_desc"
+  },
+  {
+    "text": "The work_order_note table has columns: work_order_note_id, note_category_id, work_order_id, note, created_time, created_by, last_modified_time, last_modified_by, active. Primary key: work_order_note_id. Foreign keys: work_order_id references work_order(work_order_id); note_category_id references note_category(note_category_id);",
+    "type": "schema_desc"
+  },
+  {
+    "text": "The work_order_status table has columns: work_order_status_id, code, display_name, description, active, sort_order. Primary key: work_order_status_id.",
+    "type": "schema_desc"
+  }
+]
+
+
+{
+  "output": {
+    "message": {
+      "content": [
+        {
+          "text": "```sql\nSELECT wos.display_name, wos.description \nFROM work_order AS wo \nJOIN work_order_status AS wos ON wo.work_order_status_id = wos.work_order_status_id \nWHERE wo.work_order_id = 'd19cea22-1369-439a-a55c-30f1b2e9685e' \nLIMIT 100;\n```"
+        }
+      ],
+      "role": "assistant"
+    }
+  },
+  "stopReason": "end_turn",
+  "usage": {
+    "inputTokens": 763,
+    "outputTokens": 107,
+    "totalTokens": 870,
+    "cacheReadInputTokenCount": 0,
+    "cacheWriteInputTokenCount": 0
+  }
+}
+
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "text": "You are an expert SQL generator for a PostgreSQL database.\nGiven the following context, generate a single, safe, executable SELECT SQL statement that answers the user's question.\n\nDATABASE SCHEMA:\n-- Table: work_order\nColumns: work_order_id, asset_id, workflow_id, work_order_status_id, due_date, priority, created_time, created_by, last_modified_time, last_modified_by, work_order_key, internal_work_order_id, distribution_id, operational_group_id, assignee_id, job_type_id, facility_id, operational_region_id, language_id, additional_service, search_identifier_id, search_identifier_value, prop_ep, scrid, show_code, distribution_date, property_id, file_delivery, show_uuid, replacement_status, sub_edit_type, corporate_premiere_date, region_long_name, assessment_results, rally_movie_name, network_short_name, schedule_change, is_assigned, cut_id, rally_movie_id, is_manual_due_date, received_date, cut_type, accurate_player_url, status_before_cancel, include_edit, include_script\nPrimary key: work_order_id\nForeign keys:\n  workflow_id -> workflow(workflow_id)\n  operational_group_id -> operational_group(operational_group_id)\n  asset_id -> asset(asset_id)\n  language_id -> language(language_id)\n  operational_region_id -> operational_region(operational_region_id)\n  job_type_id -> job_type(job_type_id)\n  sub_edit_type -> sub_edit_type(sub_edit_type_id)\n  additional_service -> sub_type(sub_type_id)\n  file_delivery -> sub_type(sub_type_id)\n  facility_id -> facility(facility_id)\n  work_order_status_id -> work_order_status(work_order_status_id)\n  distribution_id -> distribution(distribution_id)\n  search_identifier_id -> asset_metadata_type(asset_metadata_type_id)\n  assignee_id -> assignee(assignee_id)\n\n-- Table: work_order_status\nColumns: work_order_status_id, code, display_name, description, active, sort_order\nPrimary key: work_order_status_id\n\nUser Query: what is the status of workorder-id d19cea22-1369-439a-a55c-30f1b2e9685e\nRules:\n1. Use only SELECT statements.\n2. Use exact table and column names from the schema.\n3. Do not include DDL or DML statements.\n4. Add LIMIT 100 unless otherwise specified.\n5. Output only the SQL, either as plain text, in a code block, or as a JSON field named 'sql'.\n6. Do not include explanations or comments.\n7. Do not ask for user confirmation."
+      }
+    ]
+  }
+]

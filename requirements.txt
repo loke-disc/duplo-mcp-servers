@@ -6,3 +6,6 @@ mcp[cli]==1.10.1
 python-dotenv
 ipykernel
 httpx
+numpy
+logging
+boto3
